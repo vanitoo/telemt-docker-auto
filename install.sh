@@ -9,10 +9,11 @@ IMAGE="whn0thacked/telemt-docker:latest"
 CONTAINER_NAME="telemt"
 
 echo "🚀 Telemt One-Click Installer"
+
 mkdir -p "$CWD"
 cd "$CWD"
 
-# deps check (минимально)
+# Мини-проверки
 command -v docker >/dev/null 2>&1 || { echo "❌ docker не найден"; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo "❌ openssl не найден"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "❌ curl не найден"; exit 1; }
@@ -20,6 +21,7 @@ command -v curl >/dev/null 2>&1 || { echo "❌ curl не найден"; exit 1; 
 SECRET="$(openssl rand -hex 16)"
 echo "🔑 Секрет: $SECRET"
 
+# Конфиг telemt
 cat > telemt.toml <<EOF
 [general]
 prefer_ipv6 = false
@@ -45,6 +47,7 @@ ${USER_NAME} = "${SECRET}"
 show_link = ["${USER_NAME}"]
 EOF
 
+# docker-compose
 cat > docker-compose.yml <<EOF
 services:
   telemt:
@@ -72,25 +75,31 @@ echo "⏳ Запускаем Docker Compose..."
 docker compose down --remove-orphans >/dev/null 2>&1 || true
 docker compose up -d
 
-# Публичный IP (может быть пусто — тогда оставим как есть)
+# ВАЖНО: инициализация переменных для set -u
+TG_LINE=""
+PUBLIC_IP=""
+
+# Публичный IPv4 (может не получиться — это не ошибка)
 PUBLIC_IP="$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)"
 
-# Ждём появления tg:// строки в логах
+# Ждём, пока telemt напечатает tg:// ссылку (до 60 сек)
 echo -n "⏳ Ожидание логов... (макс 60 сек)"
-TG_LINE=""
 for _ in $(seq 1 30); do
-  # важно: --tail чтобы не читать бесконечно и не тормозить
-  TG_LINE="$(docker logs "${CONTAINER_NAME}" --tail 200 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || true)"
-  if [[ -n "$TG_LINE" ]]; then
+  # Не используем docker compose logs -f — только хвост логов контейнера
+  TG_LINE="$(docker logs "${CONTAINER_NAME}" --tail 300 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || true)"
+
+  if [[ -n "${TG_LINE:-}" ]]; then
     break
   fi
+
   echo -n "."
   sleep 2
 done
 echo ""
 
-if [[ -n "$TG_LINE" ]]; then
-  if [[ -n "$PUBLIC_IP" ]]; then
+if [[ -n "${TG_LINE:-}" ]]; then
+  # Подставляем публичный IP (если получили)
+  if [[ -n "${PUBLIC_IP:-}" ]]; then
     TG_LINE="$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/${PUBLIC_IP}/g")"
   fi
 
@@ -103,10 +112,9 @@ if [[ -n "$TG_LINE" ]]; then
   echo ""
 else
   echo ""
-  echo "⚠️ Telemt запустился, но ссылка в логах ещё не появилась за 60 секунд."
-  echo "📂 Директория: $CWD"
-  echo ""
-  echo "Сделайте так (1 команда, выдаст чистую ссылку):"
+  echo "⚠️ Telemt запустился, но tg:// ссылка не появилась за 60 сек."
+  echo "Попробуйте так:"
+  echo "cd $CWD && docker compose restart && sleep 5"
   echo "docker logs ${CONTAINER_NAME} --tail 500 | grep -o 'tg://proxy?[^ ]*' | tail -1 | sed \"s/172\\.19\\.0\\.2/\$(curl -4 -s ifconfig.me)/\""
   echo ""
 fi
