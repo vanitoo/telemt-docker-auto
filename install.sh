@@ -13,15 +13,15 @@ echo "🚀 Telemt One-Click Installer"
 mkdir -p "$CWD"
 cd "$CWD"
 
-# Мини-проверки
 command -v docker >/dev/null 2>&1 || { echo "❌ docker не найден"; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo "❌ openssl не найден"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "❌ curl не найден"; exit 1; }
 
-SECRET="$(openssl rand -hex 16)"
-echo "🔑 Секрет: $SECRET"
+# 1) Генерим базовый секрет (32 hex)
+SECRET_BASE="$(openssl rand -hex 16)"
+echo "🔑 Секрет (base): $SECRET_BASE"
 
-# Конфиг telemt
+# 2) telemt.toml
 cat > telemt.toml <<EOF
 [general]
 prefer_ipv6 = false
@@ -42,12 +42,12 @@ mask = true
 mask_port = 443
 
 [access.users]
-${USER_NAME} = "${SECRET}"
+${USER_NAME} = "${SECRET_BASE}"
 
 show_link = ["${USER_NAME}"]
 EOF
 
-# docker-compose
+# 3) docker-compose.yml
 cat > docker-compose.yml <<EOF
 services:
   telemt:
@@ -71,56 +71,56 @@ services:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
 EOF
 
+# 4) Старт
 echo "⏳ Запускаем Docker Compose..."
 docker compose down --remove-orphans >/dev/null 2>&1 || true
 docker compose up -d
 
-# ВАЖНО: инициализация переменных для set -u
-TG_LINE=""
-PUBLIC_IP=""
-
-# Публичный IPv4 (может не получиться — это не ошибка)
-PUBLIC_IP="$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)"
-
-# Ждём, пока telemt напечатает tg:// ссылку (до 60 сек)
-echo -n "⏳ Ожидание логов... (макс 60 сек)"
+# 5) Ждём, пока контейнер реально станет running (до 30 сек)
+echo -n "⏳ Ожидание контейнера... (до 30 сек)"
 for _ in $(seq 1 30); do
-  # Не используем docker compose logs -f — только хвост логов контейнера
-  TG_LINE="$(docker logs "${CONTAINER_NAME}" --tail 300 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || true)"
-
-  if [[ -n "${TG_LINE:-}" ]]; then
+  STATUS="$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if [[ "$STATUS" == "running" ]]; then
     break
   fi
-
   echo -n "."
-  sleep 2
+  sleep 1
 done
 echo ""
 
-if [[ -n "${TG_LINE:-}" ]]; then
-  # Подставляем публичный IP (если получили)
-  if [[ -n "${PUBLIC_IP:-}" ]]; then
-    TG_LINE="$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/${PUBLIC_IP}/g")"
-  fi
-
-  echo ""
-  echo "🎉 ✅ TELEMT УСТАНОВЛЕН!"
-  echo "📂 Директория: $CWD"
-  echo ""
-  echo "🔗 ГОТОВАЯ ССЫЛКА:"
-  echo "$TG_LINE"
-  echo ""
-else
-  echo ""
-  echo "⚠️ Telemt запустился, но tg:// ссылка не появилась за 60 сек."
-  echo "Попробуйте так:"
-  echo "cd $CWD && docker compose restart && sleep 5"
-  echo "docker logs ${CONTAINER_NAME} --tail 500 | grep -o 'tg://proxy?[^ ]*' | tail -1 | sed \"s/172\\.19\\.0\\.2/\$(curl -4 -s ifconfig.me)/\""
-  echo ""
+STATUS="$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+if [[ "$STATUS" != "running" ]]; then
+  echo "❌ Контейнер не запущен (status=$STATUS). Логи:"
+  docker logs "${CONTAINER_NAME}" --tail 200 || true
+  exit 1
 fi
 
-echo "🔍 Управление:"
-echo "cd $CWD"
-echo "docker compose logs -f telemt"
-echo "docker compose restart"
-echo "docker compose down"
+# 6) Публичный IP
+PUBLIC_IP="$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)"
+if [[ -z "${PUBLIC_IP:-}" ]]; then
+  echo "⚠️ Не смог получить публичный IPv4 (ifconfig.me)."
+  PUBLIC_IP="YOUR_PUBLIC_IP"
+fi
+
+# 7) Для EE-TLS Telemt использует секрет вида:
+# ee + base_secret + hex(".domain")
+# ".google.com" -> 2e676f6f676c652e636f6d
+DOMAIN_HEX="$(printf '.%s' "$TLS_DOMAIN" | xxd -p -c 9999 | tr -d '\n')"
+SECRET_EE_TLS="ee${SECRET_BASE}${DOMAIN_HEX}"
+
+TG_LINK="tg://proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${SECRET_EE_TLS}"
+
+cat <<END
+
+🎉 ✅ TELEMT УСТАНОВЛЕН!
+📂 Директория: ${CWD}
+
+🔗 ГОТОВАЯ ССЫЛКА (только строка):
+${TG_LINK}
+
+🔍 Управление:
+cd ${CWD}
+docker compose logs -f telemt
+docker compose restart
+docker compose down
+END
