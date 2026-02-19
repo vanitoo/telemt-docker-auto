@@ -1,53 +1,62 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# 🌈 Telemt MTProxy One-Click Installer v2.1 (FIXED)
-echo "🚀 Telemt One-Click v2.1"
-
 CWD="/opt/telemt-docker"
-mkdir -p "$CWD" && cd "$CWD"
+PORT="9443"
+TLS_DOMAIN="www.google.com"
+USER_NAME="user1"
+IMAGE="whn0thacked/telemt-docker:latest"
+CONTAINER_NAME="telemt"
 
-# 🔑 Секрет
-SECRET=$(openssl rand -hex 16)
+echo "🚀 Telemt One-Click Installer"
+mkdir -p "$CWD"
+cd "$CWD"
+
+# deps check (минимально)
+command -v docker >/dev/null 2>&1 || { echo "❌ docker не найден"; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "❌ openssl не найден"; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "❌ curl не найден"; exit 1; }
+
+SECRET="$(openssl rand -hex 16)"
 echo "🔑 Секрет: $SECRET"
 
-# 📄 telemt.toml
-cat > telemt.toml << EOF
+cat > telemt.toml <<EOF
 [general]
 prefer_ipv6 = false
 fast_mode = true
 
 [general.modes]
+classic = false
+secure = false
 tls = true
 
 [server]
-port = 9443
+port = ${PORT}
 listen_addr_ipv4 = "0.0.0.0"
 
 [censorship]
-tls_domain = "www.google.com"
+tls_domain = "${TLS_DOMAIN}"
 mask = true
 mask_port = 443
 
 [access.users]
-user1 = "$SECRET"
+${USER_NAME} = "${SECRET}"
 
-show_link = ["user1"]
+show_link = ["${USER_NAME}"]
 EOF
 
-# 🐳 docker-compose.yml
-cat > docker-compose.yml << 'EOF'
+cat > docker-compose.yml <<EOF
 services:
   telemt:
-    image: whn0thacked/telemt-docker:latest
-    container_name: telemt
+    image: ${IMAGE}
+    container_name: ${CONTAINER_NAME}
     restart: unless-stopped
     environment:
       RUST_LOG: "info"
     volumes:
       - ./telemt.toml:/etc/telemt.toml:ro
     ports:
-      - "9443:9443/tcp"
+      - "${PORT}:${PORT}/tcp"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -59,55 +68,51 @@ services:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
 EOF
 
-# 🚀 Запуск
-echo "⏳ Docker Compose..."
-docker compose down 2>/dev/null || true
+echo "⏳ Запускаем Docker Compose..."
+docker compose down --remove-orphans >/dev/null 2>&1 || true
 docker compose up -d
 
-# ⏳ Ожидание (60 сек)
-echo -n "⏳ Ожидание логов... (60 сек)"
-for i in {1..20}; do
-    sleep 3
-    echo -n "."
-    
-    # Проверяем логи
-    if docker compose logs telemt 2>/dev/null | grep -q "tg://proxy"; then
-        echo ""
-        echo "✅ Логи найдены!"
-        break
-    fi
+# Публичный IP (может быть пусто — тогда оставим как есть)
+PUBLIC_IP="$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)"
+
+# Ждём появления tg:// строки в логах
+echo -n "⏳ Ожидание логов... (макс 60 сек)"
+TG_LINE=""
+for _ in $(seq 1 30); do
+  # важно: --tail чтобы не читать бесконечно и не тормозить
+  TG_LINE="$(docker logs "${CONTAINER_NAME}" --tail 200 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || true)"
+  if [[ -n "$TG_LINE" ]]; then
+    break
+  fi
+  echo -n "."
+  sleep 2
 done
 echo ""
 
-# 🌐 IP
-PUBLIC_IP=$(curl -4 -s --connect-timeout 10 ifconfig.me 2>/dev/null || curl -4 -s --connect-timeout 10 ipinfo.io/ip 2>/dev/null || echo "127.0.0.1")
+if [[ -n "$TG_LINE" ]]; then
+  if [[ -n "$PUBLIC_IP" ]]; then
+    TG_LINE="$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/${PUBLIC_IP}/g")"
+  fi
 
-# 🔗 Ссылка (✅ ИСПРАВЛЕНО)
-TG_LINE=$(docker compose logs telemt 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || echo "")
-if [[ -n "$TG_LINE" && "$TG_LINE" == tg://proxy?* ]]; then
-    TG_LINK=$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/$PUBLIC_IP/g" | sed "s/localhost/$PUBLIC_IP/g")
+  echo ""
+  echo "🎉 ✅ TELEMT УСТАНОВЛЕН!"
+  echo "📂 Директория: $CWD"
+  echo ""
+  echo "🔗 ГОТОВАЯ ССЫЛКА:"
+  echo "$TG_LINE"
+  echo ""
 else
-    TG_LINK="🔄 Перезапустите: cd $CWD && docker compose restart"
+  echo ""
+  echo "⚠️ Telemt запустился, но ссылка в логах ещё не появилась за 60 секунд."
+  echo "📂 Директория: $CWD"
+  echo ""
+  echo "Сделайте так (1 команда, выдаст чистую ссылку):"
+  echo "docker logs ${CONTAINER_NAME} --tail 500 | grep -o 'tg://proxy?[^ ]*' | tail -1 | sed \"s/172\\.19\\.0\\.2/\$(curl -4 -s ifconfig.me)/\""
+  echo ""
 fi
 
-# 🎉 Вывод
-cat << END
-
-🎉 ✅ TELEMT v2.1 УСТАНОВЛЕН!
-
-📂 $CWD
-🔗 $TG_LINK
-
-📊 СТАТУС:
-$(docker compose ps | tail -n +3)
-
-📋 КОМАНДЫ:
-cd $CWD
-docker compose logs -f      # Логи
-docker compose restart      # 🔄 Ссылка
-END
-
-# Тест порта
-if [[ "$PUBLIC_IP" != "127.0.0.1" ]]; then
-    echo "🔍 nc -zv $PUBLIC_IP 9443"
-fi
+echo "🔍 Управление:"
+echo "cd $CWD"
+echo "docker compose logs -f telemt"
+echo "docker compose restart"
+echo "docker compose down"
