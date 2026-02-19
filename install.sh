@@ -2,9 +2,9 @@
 set -euo pipefail
 
 CWD="/opt/telemt-docker"
-PORT="9443"
-TLS_DOMAIN="www.google.com"
-USER_NAME="user1"
+PORT="${PORT:-9443}"
+TLS_DOMAIN="${TLS_DOMAIN:-www.google.com}"
+USER_NAME="${USER_NAME:-user1}"
 IMAGE="whn0thacked/telemt-docker:latest"
 CONTAINER_NAME="telemt"
 
@@ -18,16 +18,11 @@ command -v openssl >/dev/null 2>&1 || { echo "❌ openssl не найден"; ex
 command -v curl >/dev/null 2>&1 || { echo "❌ curl не найден"; exit 1; }
 command -v xxd >/dev/null 2>&1 || { echo "❌ xxd не найден (обычно пакет vim-common)"; exit 1; }
 
-# 1) Генерим базовый секрет (32 hex)
 SECRET_BASE="$(openssl rand -hex 16)"
 echo "🔑 Секрет (base): $SECRET_BASE"
 
-# 2) telemt.toml
+# telemt.toml — ВАЖНО: show_link не используем (ломает запуск на вашей версии)
 cat > telemt.toml <<EOF
-# Users to show in startup log (tg:// links)
-# ВАЖНО: в telemt show_link ожидает СТРОКУ, не массив
-show_link = "${USER_NAME}"
-
 [general]
 prefer_ipv6 = false
 fast_mode = true
@@ -50,7 +45,6 @@ mask_port = 443
 ${USER_NAME} = "${SECRET_BASE}"
 EOF
 
-# 3) docker-compose.yml
 cat > docker-compose.yml <<EOF
 services:
   telemt:
@@ -78,7 +72,6 @@ echo "⏳ Запускаем Docker Compose..."
 docker compose down --remove-orphans >/dev/null 2>&1 || true
 docker compose up -d
 
-# 4) Ждём running (до 30 сек)
 echo -n "⏳ Ожидание контейнера... (до 30 сек)"
 for _ in $(seq 1 30); do
   STATUS="$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
@@ -97,30 +90,13 @@ if [[ "$STATUS" != "running" ]]; then
   exit 1
 fi
 
-# 5) Публичный IP
 PUBLIC_IP="$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null || true)"
 if [[ -z "${PUBLIC_IP:-}" ]]; then
-  echo "⚠️ Не смог получить публичный IPv4. Подставьте сами в ссылке."
   PUBLIC_IP="YOUR_PUBLIC_IP"
 fi
 
-# 6) Собираем EE-TLS secret: ee + base_secret + hex(".domain")
 DOMAIN_HEX="$(printf '.%s' "$TLS_DOMAIN" | xxd -p -c 9999 | tr -d '\n')"
 SECRET_EE_TLS="ee${SECRET_BASE}${DOMAIN_HEX}"
 
-TG_LINK="tg://proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${SECRET_EE_TLS}"
-
-cat <<END
-
-🎉 ✅ TELEMT УСТАНОВЛЕН!
-📂 Директория: ${CWD}
-
-tg:// ссылка (чистая строка):
-${TG_LINK}
-
-Управление:
-cd ${CWD}
-docker compose logs -f telemt
-docker compose restart
-docker compose down
-END
+# Чистая строка (как вы просили)
+echo "tg://proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${SECRET_EE_TLS}"
