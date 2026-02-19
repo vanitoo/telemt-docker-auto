@@ -1,15 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# 🌈 Telemt MTProxy One-Click Installer v2.0
-# Порт 9443 | Docker | Авто IP | Надежная ссылка
-
-echo "🚀 Telemt One-Click Installer"
+# 🌈 Telemt MTProxy One-Click Installer v2.1 (FIXED)
+echo "🚀 Telemt One-Click v2.1"
 
 CWD="/opt/telemt-docker"
 mkdir -p "$CWD" && cd "$CWD"
 
-# 🔑 Генерация секрета
+# 🔑 Секрет
 SECRET=$(openssl rand -hex 16)
 echo "🔑 Секрет: $SECRET"
 
@@ -20,8 +18,6 @@ prefer_ipv6 = false
 fast_mode = true
 
 [general.modes]
-classic = false
-secure = false
 tls = true
 
 [server]
@@ -32,7 +28,6 @@ listen_addr_ipv4 = "0.0.0.0"
 tls_domain = "www.google.com"
 mask = true
 mask_port = 443
-fake_cert_len = 2048
 
 [access.users]
 user1 = "$SECRET"
@@ -62,69 +57,57 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 EOF
 
 # 🚀 Запуск
-echo "⏳ Запускаем Docker Compose..."
+echo "⏳ Docker Compose..."
 docker compose down 2>/dev/null || true
 docker compose up -d
 
-# ⏳ Надежное ожидание логов (до 60 сек)
-echo "⏳ Ожидание логов... (макс 60 сек)"
-MAX_WAIT=60
-COUNTER=0
-
-while [ $COUNTER -lt $MAX_WAIT ]; do
-    if docker compose ps | grep -q "Up"; then
-        sleep 3
-        TG_LINE=$(docker compose logs telemt 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1)
-        if [[ "$TG_LINE" == tg://proxy?* ]]; then
-            break
-        fi
-    fi
-    COUNTER=$((COUNTER+3))
+# ⏳ Ожидание (60 сек)
+echo -n "⏳ Ожидание логов... (60 сек)"
+for i in {1..20}; do
+    sleep 3
     echo -n "."
+    
+    # Проверяем логи
+    if docker compose logs telemt 2>/dev/null | grep -q "tg://proxy"; then
+        echo ""
+        echo "✅ Логи найдены!"
+        break
+    fi
 done
+echo ""
 
-# 🌐 Получаем публичный IP
-PUBLIC_IP=$(curl -4 -s --connect-timeout 5 ifconfig.me || curl -4 -s --connect-timeout 5 ipinfo.io/ip || echo "127.0.0.1")
+# 🌐 IP
+PUBLIC_IP=$(curl -4 -s --connect-timeout 10 ifconfig.me 2>/dev/null || curl -4 -s --connect-timeout 10 ipinfo.io/ip 2>/dev/null || echo "127.0.0.1")
 
-# 🔗 Формируем финальную ссылку
-if [[ "$TG_LINE" == tg://proxy?* ]]; then
-    TG_LINK=$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/$PUBLIC_IP/" | sed "s/localhost/$PUBLIC_IP/")
+# 🔗 Ссылка (✅ ИСПРАВЛЕНО)
+TG_LINE=$(docker compose logs telemt 2>/dev/null | grep -o 'tg://proxy?[^ ]*' | tail -1 || echo "")
+if [[ -n "$TG_LINE" && "$TG_LINE" == tg://proxy?* ]]; then
+    TG_LINK=$(echo "$TG_LINE" | sed "s/172\.19\.0\.2/$PUBLIC_IP/g" | sed "s/localhost/$PUBLIC_IP/g")
 else
-    TG_LINK="🔄 Логи не готовы. Выполните: cd $CWD && docker compose restart"
+    TG_LINK="🔄 Перезапустите: cd $CWD && docker compose restart"
 fi
 
-# 🎉 Финальный вывод
+# 🎉 Вывод
 cat << END
 
-🎉 ✅ TELEMT УСТАНОВЛЕН v2.0!
+🎉 ✅ TELEMT v2.1 УСТАНОВЛЕН!
 
-📂 Директория: $CWD
-🔗 ГОТОВАЯ ССЫЛКА:
-$TG_LINK
+📂 $CWD
+🔗 $TG_LINK
 
-🔍 СТАТУС:
-$(docker compose ps)
+📊 СТАТУС:
+$(docker compose ps | tail -n +3)
 
-📋 УПРАВЛЕНИЕ:
+📋 КОМАНДЫ:
 cd $CWD
-docker compose logs -f         # 🔴 Логи в реальном времени
-docker compose restart         # 🔄 Перезапуск
-docker compose down            # 🛑 Остановка
-
-🔗 НОВАЯ ССЫЛКА (если IP изменился):
-docker compose logs telemt | grep -o 'tg://proxy?[^ ]*' | tail -1 | sed "s/172\\.19\\.0\\.2/$(curl -4 -s ifconfig.me)/"
-
+docker compose logs -f      # Логи
+docker compose restart      # 🔄 Ссылка
 END
 
-# ✅ Проверка порта
+# Тест порта
 if [[ "$PUBLIC_IP" != "127.0.0.1" ]]; then
-    echo "🔍 Тест порта (выполните с другого хоста): nc -zv $PUBLIC_IP 9443"
+    echo "🔍 nc -zv $PUBLIC_IP 9443"
 fi
