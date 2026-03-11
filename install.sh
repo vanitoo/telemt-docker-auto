@@ -2,8 +2,8 @@
 set -euo pipefail
 
 CWD="/opt/telemt-docker"
-PORT="${PORT:-9443}"
-TLS_DOMAIN="${TLS_DOMAIN:-www.google.com}"
+PORT="${PORT:-2053}"
+TLS_DOMAIN="${TLS_DOMAIN:-ajax.cloudflare.com}"
 USER_NAME="${USER_NAME:-user1}"
 IMAGE="whn0thacked/telemt-docker:latest"
 CONTAINER_NAME="telemt"
