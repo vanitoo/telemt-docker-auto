@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Fix args when script is executed via: bash <(curl ...)
+if [[ $# -eq 0 && -n "${BASH_ARGV:-}" ]]; then
+    set -- "${BASH_ARGV[@]}"
+fi
+
 CWD="/opt/telemt-docker"
 CONFIG="$CWD/telemt.toml"
 
