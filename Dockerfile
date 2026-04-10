@@ -1,69 +1,83 @@
 # syntax=docker/dockerfile:1.7
 
-ARG TELEMT_REPO=https://github.com/telemt/telemt.git
-ARG TELEMT_REF=main
+ARG TELEMT_VERSION=
 
-FROM --platform=$TARGETPLATFORM rust:alpine AS build
+FROM --platform=$TARGETPLATFORM alpine:latest AS fetch
 
-ARG TELEMT_REPO
-ARG TELEMT_REF
+ARG TELEMT_VERSION
+ARG TARGETARCH
 
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true \
-    CARGO_TERM_COLOR=always \
-    CARGO_PROFILE_RELEASE_LTO=true \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-    CARGO_PROFILE_RELEASE_DEBUG=false \
-    OPENSSL_STATIC=1
-
-WORKDIR /src
+# ── Cache-buster: передайте при сборке, например:
+#    docker build --build-arg CACHEBUST="$(date +%s)" ...
+# Если TELEMT_VERSION задан явно, кеш-бастер не нужен,
+# но и не помешает — слой и так инвалидируется при смене версии.
+ARG CACHEBUST=
 
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add --no-cache \
-      ca-certificates git \
-      build-base musl-dev pkgconf perl \
+      ca-certificates \
+      curl \
+      tar \
       binutils \
-      openssl-dev openssl-libs-static \
-      zlib-dev zlib-static \
+      upx \
     && update-ca-certificates
 
-RUN --mount=type=cache,target=/root/.cache/git \
-    git clone --depth=1 --branch "${TELEMT_REF}" "${TELEMT_REPO}" . \
-    || (git init . && git remote add origin "${TELEMT_REPO}" \
-        && git fetch --depth=1 origin "${TELEMT_REF}" \
-        && git checkout --detach FETCH_HEAD)
-
-RUN rustup component add rustfmt
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
-    set -eux; \
+# ↓↓↓  Используем CACHEBUST внутри RUN, чтобы Docker не мог
+#       считать слой неизменным при пустом TELEMT_VERSION
+RUN set -eux; \
+    echo "cache-bust: ${CACHEBUST}"; \
     \
-    cargo fmt --all; \
+    case "${TARGETARCH}" in \
+      amd64)  ARCH=x86_64  ;; \
+      arm64)  ARCH=aarch64 ;; \
+      *) echo "unsupported arch: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
     \
-    if [ ! -f Cargo.lock ]; then cargo generate-lockfile; fi; \
+    if [ -n "${TELEMT_VERSION}" ]; then \
+      VERSION="${TELEMT_VERSION}"; \
+    else \
+      VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        https://github.com/telemt/telemt/releases/latest | sed 's#.*/##')"; \
+    fi; \
     \
-    (cargo fix --bin "telemt" -p telemt --allow-dirty --allow-staged || true); \
+    BASE_URL="https://github.com/telemt/telemt/releases/download/${VERSION}"; \
+    TARBALL="telemt-${ARCH}-linux-musl.tar.gz"; \
     \
-    cargo fmt --all; \
+    echo "=== Using release ${VERSION} ==="; \
+    echo "=== Downloading ${TARBALL} ==="; \
+    curl -fsSL -o "/tmp/${TARBALL}" "${BASE_URL}/${TARBALL}"; \
+    curl -fsSL -o "/tmp/${TARBALL}.sha256" "${BASE_URL}/${TARBALL}.sha256"; \
     \
-    cargo build --release --locked --bin telemt; \
+    echo "=== Verifying checksum ==="; \
+    cd /tmp && sha256sum -c "${TARBALL}.sha256"; \
     \
+    echo "=== Extracting ==="; \
     mkdir -p /out; \
-    install -Dm755 target/release/telemt /out/telemt; \
-    strip /out/telemt; \
+    tar -xzf "/tmp/${TARBALL}" -C /out; \
+    chmod 755 /out/telemt; \
     \
-    if readelf -lW /out/telemt | grep -q "Requesting program interpreter"; then \
+    echo "=== Verifying static linkage ==="; \
+    if readelf -lW /out/telemt 2>/dev/null | grep -q "Requesting program interpreter"; then \
       echo "ERROR: telemt is dynamically linked -> cannot run in distroless/static"; \
       exit 1; \
+    fi
+
+RUN set -eux; \
+    echo "=== Before UPX ===" && ls -lh /out/telemt; \
+    if upx --ultra-brute --preserve-build-id /out/telemt; then \
+      echo "=== After UPX ===" && ls -lh /out/telemt; \
+      echo "=== Integrity check ===" && upx -t /out/telemt; \
+    else \
+      echo "=== UPX failed on ${TARGETARCH}, skipping compression ==="; \
+      ls -lh /out/telemt; \
     fi
 
 FROM gcr.io/distroless/static:nonroot AS runtime
 
 STOPSIGNAL SIGINT
 
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/telemt /usr/local/bin/telemt
+COPY --from=fetch /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=fetch /out/telemt /usr/local/bin/telemt
 
 WORKDIR /tmp
 
